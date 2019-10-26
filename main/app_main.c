@@ -6,6 +6,7 @@
 #include "esp_system.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
+#include "tcpip_adapter.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -31,17 +32,23 @@
 #define SAMPLE_PERIOD        (1000)   // milliseconds
 
 static const char *TAG = "MQTT_EXAMPLE";
-static const char *OK_MSG_JSON = "{\"id\":\"%02x%02x%02x%02x%02x%02x\",\"temp\":%.1f}";
-static const char *ERROR_MSG_JSON = "{\"id\":\"%02x%02x%02x%02x%02x%02x\",\"error\":\"%s\"}";
+static const char *OK_MSG_JSON = "{\"ip\":\"%s\",\"id\":\"%02x%02x%02x%02x%02x%02x\",\"temp\":%.1f}";
+static const char *ERROR_MSG_JSON = "{\"ip\":\"%s\",\"id\":\"%02x%02x%02x%02x%02x%02x\",\"error\":\"%s\"}";
+static const char *VERSION_MSG_JSON = "{\"ip\":\"%s\",\"version\":\"%s\"}";
 static const char *DS18B20_ERROR_MSG_DEVICE = "deviceError";
 static const char *DS18B20_ERROR_MSG_CRC = "crcError";
 static const char *DS18B20_ERROR_MSG_OWB = "owbError";
 static const char *DS18B20_ERROR_MSG_NULL = "nullValueError";
 static const char *DS18B20_ERROR_MSG_UNKNOWN = "unknownError";
 
+// Embedded files
+extern const uint8_t version_start[] asm("_binary_version_txt_start");
+extern const uint8_t version_end[] asm("_binary_version_txt_end");
+
 
 static EventGroupHandle_t wifi_event_group;
 static esp_mqtt_client_handle_t _client;
+static char _ip[16];
 static uint8_t _connected = 0;
 
 const static int CONNECTED_BIT = BIT0;
@@ -50,12 +57,16 @@ const static int CONNECTED_BIT = BIT0;
 static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
 {
     esp_mqtt_client_handle_t client = event->client;
+    int msg_id;
     // your_context_t *context = event->context;
     switch (event->event_id) {
         case MQTT_EVENT_CONNECTED:
             _connected = 1;
             _client = client;
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+
+            msg_id = esp_mqtt_client_subscribe(_client, "home/upgrade", 1);
+            ESP_LOGI(TAG, "Sent subscribe to home/upgrade, msg_id=%d", msg_id);
             break;
         case MQTT_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "MQTT_EVENT_DISCONNECTED");
@@ -108,7 +119,8 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
     switch (event_id) {
         case IP_EVENT_STA_GOT_IP:
             xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
-
+            const ip_event_got_ip_t *event = (const ip_event_got_ip_t *) event_data;
+            sprintf(_ip, IPSTR, IP2STR(&event->ip_info.ip));
             break;
         default:
             break;
@@ -160,7 +172,7 @@ uint8_t wifi_wait(TickType_t xTicksToWait) {
     return (uint8_t)((bits & CONNECTED_BIT) == CONNECTED_BIT);
 }
 
-void publish_task(void *pParam) {
+void version_report_task(void *pParam) {
     int msg_id;
     uint8_t wifi_connected = wifi_wait(portMAX_DELAY);
     ESP_LOGI(TAG, "WiFi state after initial wait is %s.", wifi_connected ? "connected" : "not connected");
@@ -174,7 +186,7 @@ void publish_task(void *pParam) {
         }
         else {
             ESP_LOGI(TAG, "WiFi not connected, skipping publish...");
-        }
+        } 
 
         vTaskDelay(1000 / portTICK_PERIOD_MS);
     }
@@ -314,6 +326,7 @@ void logging_task()
                 {
                     if (errors[i] == DS18B20_OK) {
                         sprintf(message, OK_MSG_JSON,
+                            _ip,
                             device_rom_codes[i].fields.serial_number[0],
                             device_rom_codes[i].fields.serial_number[1],
                             device_rom_codes[i].fields.serial_number[2],
@@ -343,6 +356,7 @@ void logging_task()
                         }
 
                         sprintf(message, ERROR_MSG_JSON,
+                            _ip,
                             device_rom_codes[i].fields.serial_number[0],
                             device_rom_codes[i].fields.serial_number[1],
                             device_rom_codes[i].fields.serial_number[2],
@@ -353,7 +367,11 @@ void logging_task()
                     }
 
                     msg_id = esp_mqtt_client_publish(_client, "home/pool", message, 0, 1, 0);
-                    ESP_LOGI(TAG, "Published message msg_id=%d: %s", msg_id, message);
+                    ESP_LOGI(TAG, "Published logger message msg_id=%d: %s", msg_id, message);
+
+                    sprintf(message, VERSION_MSG_JSON, _ip, (const char *)version_start);
+                    msg_id = esp_mqtt_client_publish(_client, "home/versions", message, 0, 1, 0);
+                    ESP_LOGI(TAG, "Published version message msg_id=%d: %s", msg_id, message);
                 }
             }
             else {
