@@ -174,6 +174,7 @@ uint8_t wifi_wait(TickType_t xTicksToWait) {
 
 void version_report_task(void *pParam) {
     int msg_id;
+    char message[100];
     uint8_t wifi_connected = wifi_wait(portMAX_DELAY);
     ESP_LOGI(TAG, "WiFi state after initial wait is %s.", wifi_connected ? "connected" : "not connected");
     
@@ -181,14 +182,15 @@ void version_report_task(void *pParam) {
         // Check that wifi is still connected
         wifi_connected = wifi_wait(0);
         if (_connected && wifi_connected) {
-            msg_id = esp_mqtt_client_publish(_client, "home/pool", "{ \"temp\": 28.1 }", 0, 1, 0);
-            ESP_LOGI(TAG, "sent publish successful, msg_id=%d", msg_id);
+            sprintf(message, VERSION_MSG_JSON, _ip, (const char *)version_start);
+            msg_id = esp_mqtt_client_publish(_client, "home/versions", message, 0, 1, 0);
+            ESP_LOGI(TAG, "Published version message msg_id=%d: %s", msg_id, message);
         }
         else {
             ESP_LOGI(TAG, "WiFi not connected, skipping publish...");
         } 
 
-        vTaskDelay(1000 / portTICK_PERIOD_MS);
+        vTaskDelay(10000 / portTICK_PERIOD_MS);
     }
 }
 
@@ -368,10 +370,6 @@ void logging_task()
 
                     msg_id = esp_mqtt_client_publish(_client, "home/pool", message, 0, 1, 0);
                     ESP_LOGI(TAG, "Published logger message msg_id=%d: %s", msg_id, message);
-
-                    sprintf(message, VERSION_MSG_JSON, _ip, (const char *)version_start);
-                    msg_id = esp_mqtt_client_publish(_client, "home/versions", message, 0, 1, 0);
-                    ESP_LOGI(TAG, "Published version message msg_id=%d: %s", msg_id, message);
                 }
             }
             else {
@@ -412,4 +410,5 @@ void app_main()
     wifi_init();
     mqtt_app_start();
     xTaskCreate(logging_task, "logging", STACK_SIZE, NULL, 5, NULL);
+    xTaskCreate(version_report_task, "logging", STACK_SIZE, NULL, 5, NULL);
 }
