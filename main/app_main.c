@@ -24,6 +24,7 @@
 
 #include "esp_log.h"
 #include "mqtt_client.h"
+#include "crc32.h"
 
 #define STACK_SIZE 4096
 #define GPIO_DS18B20_0       (CONFIG_ONE_WIRE_GPIO)
@@ -52,6 +53,11 @@ static char _ip[16];
 static uint8_t _connected = 0;
 
 const static int CONNECTED_BIT = BIT0;
+
+
+int update_started = false;
+int update_msg_id = 0;
+uint32_t update_crc = 0;
 
 
 static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
@@ -83,8 +89,37 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             break;
         case MQTT_EVENT_DATA:
             ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-            ESP_LOGI(TAG, "TOPIC=%.*s\r\n", event->topic_len, event->topic);
-            ESP_LOGI(TAG, "DATA=%.*s\r\n", event->data_len, event->data);
+            ESP_LOGI(TAG, "msg_id=%d", event->msg_id);
+            ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
+            //ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
+            ESP_LOGI(TAG, "TOTAL=%d", event->total_data_len);
+
+
+            if (strncmp(event->topic, "home/upgrade", event->topic_len) == 0) {
+                if (event->current_data_offset == 0) {
+                    // Start receiving update
+                    ESP_LOGI(TAG, "Upgrade message: start");
+                    update_msg_id = event->msg_id;
+                    update_crc = 0;
+                    update_started = true;
+                }
+                else if (update_started && update_msg_id == event->msg_id) {
+                    // Continuation of existing update message
+                    ESP_LOGI(TAG, "Upgrade message: continuation");
+                }
+                else {
+                    ESP_LOGI(TAG, "Upgrade message: upgrade unsuccessful, ignoring data");
+                }
+
+                crc32(event->data, (size_t)event->data_len, &update_crc);
+
+                if (event->current_data_offset + event->data_len == event->total_data_len) {
+                    ESP_LOGI(TAG, "Upgrade message: end");
+                    ESP_LOGI(TAG, "Upgrade message: CRC32 %08x", update_crc);
+                    update_crc = 0;
+                    update_started = 0;
+                }
+            }
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -177,7 +212,7 @@ void version_report_task(void *pParam) {
     char message[100];
     uint8_t wifi_connected = wifi_wait(portMAX_DELAY);
     ESP_LOGI(TAG, "WiFi state after initial wait is %s.", wifi_connected ? "connected" : "not connected");
-    
+
     while (1) {
         // Check that wifi is still connected
         wifi_connected = wifi_wait(0);
@@ -188,7 +223,7 @@ void version_report_task(void *pParam) {
         }
         else {
             ESP_LOGI(TAG, "WiFi not connected, skipping publish...");
-        } 
+        }
 
         vTaskDelay(10000 / portTICK_PERIOD_MS);
     }
@@ -209,7 +244,7 @@ void logging_task()
     owb_use_crc(owb, true);  // enable CRC check for ROM code
 
     // Find all connected devices
-    ESP_LOGI(TAG, "Find devices:\n");
+    ESP_LOGI(TAG, "Find devices:");
     OneWireBus_ROMCode device_rom_codes[MAX_DEVICES] = {0};
     int num_devices = 0;
     OneWireBus_SearchState search_state = {0};
@@ -219,12 +254,12 @@ void logging_task()
     {
         char rom_code_s[17];
         owb_string_from_rom_code(search_state.rom_code, rom_code_s, sizeof(rom_code_s));
-        ESP_LOGI(TAG, "  %d : %s\n", num_devices, rom_code_s);
+        ESP_LOGI(TAG, "  %d : %s", num_devices, rom_code_s);
         device_rom_codes[num_devices] = search_state.rom_code;
         ++num_devices;
         owb_search_next(owb, &search_state, &found);
     }
-    ESP_LOGI(TAG, "Found %d device%s\n", num_devices, num_devices == 1 ? "" : "s");
+    ESP_LOGI(TAG, "Found %d device%s", num_devices, num_devices == 1 ? "" : "s");
 
     // In this example, if a single device is present, then the ROM code is probably
     // not very interesting, so just print it out. If there are multiple devices,
@@ -239,7 +274,7 @@ void logging_task()
         {
             char rom_code_s[OWB_ROM_CODE_STRING_LENGTH];
             owb_string_from_rom_code(rom_code, rom_code_s, sizeof(rom_code_s));
-            ESP_LOGI(TAG, "Single device %s present\n", rom_code_s);
+            ESP_LOGI(TAG, "Single device %s present", rom_code_s);
         }
         else
         {
@@ -262,7 +297,7 @@ void logging_task()
         owb_status search_status = owb_verify_rom(owb, known_device, &is_present);
         if (search_status == OWB_STATUS_OK)
         {
-            ESP_LOGI(TAG, "Device %s is %s\n", rom_code_s, is_present ? "present" : "not present");
+            ESP_LOGI(TAG, "Device %s is %s", rom_code_s, is_present ? "present" : "not present");
         }
         else
         {
@@ -279,7 +314,7 @@ void logging_task()
 
         if (num_devices == 1)
         {
-            ESP_LOGI(TAG, "Single device optimisations enabled\n");
+            ESP_LOGI(TAG, "Single device optimisations enabled");
             ds18b20_init_solo(ds18b20_info, owb); // only one device on bus
         }
         else
@@ -387,7 +422,7 @@ void logging_task()
     }
     owb_uninitialize(owb);
 
-    ESP_LOGI(TAG, "Restarting now.\n");
+    ESP_LOGI(TAG, "Restarting now.");
     fflush(stdout);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
     esp_restart();
