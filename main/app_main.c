@@ -63,9 +63,9 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
 {
     esp_mqtt_client_handle_t client = event->client;
     int msg_id;
+    int process_bin = false;
     char software_type[16];
     char version[32];
-    char channel_name[20];
 
     // your_context_t *context = event->context;
     switch (event->event_id) {
@@ -91,53 +91,59 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
             break;
         case MQTT_EVENT_DATA:
-            ESP_LOGI(TAG, "MQTT_EVENT_DATA");
-            ESP_LOGI(TAG, "msg_id=%d", event->msg_id);
-            ESP_LOGI(TAG, "TOPIC=%.*s", event->topic_len, event->topic);
-            //ESP_LOGI(TAG, "DATA=%.*s", event->data_len, event->data);
-            ESP_LOGI(TAG, "TOTAL=%d", event->total_data_len);
+            ESP_LOGI(TAG, "MQTT_EVENT_DATA, msg_id=%d, topic=%.*s, offset=%d, len=%d",
+                event->msg_id, event->topic_len, event->topic, event->current_data_offset, event->total_data_len);
 
-            if (strncmp(event->topic, "home/ota/advertise", event->topic_len) == 0) {
+            if (event->topic_len > 0 && strncmp(event->topic, "home/ota/advertise", event->topic_len) == 0) {
                 ESP_LOGI(TAG, "home/ota/advertise message");
-                // Decode advertise message
-                sscanf(event->data, "%s%s%s%x", software_type, version, channel_name, &advertised_crc32);
-                ESP_LOGI(TAG, "software_type=%s", software_type);
-                ESP_LOGI(TAG, "version=%s", version);
-                ESP_LOGI(TAG, "channel_name=%s", channel_name);
-                ESP_LOGI(TAG, "crc32=%08x", advertised_crc32);
 
-                // snprintf(update_channel, sizeof(update_channel), "home/ota/%s", channel_name);
-                // msg_id = esp_mqtt_client_subscribe(_client, update_channel, 1);
-                // ESP_LOGI(TAG, "Sent subscribe to %s, msg_id=%d", update_channel, msg_id);
+                // Decode advertise message
+                sscanf(event->data, "%s%s%s%x", software_type, version, update_channel, &advertised_crc32);
+                ESP_LOGI(TAG, "type=%s, version=%s, channel=%s, crc32=%08x",
+                    software_type, version, update_channel, advertised_crc32);
+
+                if (!update_started) {
+                    msg_id = esp_mqtt_client_subscribe(_client, update_channel, 1);
+                    ESP_LOGI(TAG, "Subscription %d sent for channel %s.", msg_id, update_channel);
+
+                    update_crc = 0;
+                    update_started = true;
+                }
+                else {
+                    ESP_LOGI(TAG, "Update has already started, ignoring home/ota/advertise message for channel %s.", update_channel);
+                }
             }
-            else if (strncmp(event->topic, update_channel, event->topic_len) == 0) {
-                ESP_LOGI(TAG, "home/ota/%s message", update_channel);
+            else if (event->topic_len > 0 && strncmp(event->topic, update_channel, event->topic_len) == 0) {
+                ESP_LOGI(TAG, "%s message", update_channel);
                 if (event->current_data_offset == 0) {
                     // Start receiving update
                     ESP_LOGI(TAG, "Upgrade message: start");
                     update_msg_id = event->msg_id;
-                    update_crc = 0;
-                    update_started = true;
+                    process_bin = true;
                 }
-                else if (update_started && update_msg_id == event->msg_id) {
-                    // Continuation of existing update message
-                    ESP_LOGI(TAG, "Upgrade message: continuation");
-                }
-                else {
-                    ESP_LOGI(TAG, "Upgrade message: upgrade unsuccessful, ignoring data");
-                    esp_mqtt_client_unsubscribe(_client, update_channel);
-                }
+            }
+            else if (event->topic_len == 0 && update_started && update_msg_id == event->msg_id) {
+                ESP_LOGI(TAG, "Upgrade message: continuation");
+                process_bin = true;
+            }
+            else {
+                ESP_LOGI(TAG, "Upgrade message: upgrade unsuccessful, ignoring data");
+                esp_mqtt_client_unsubscribe(_client, update_channel);
+            }
+
+            if (process_bin) {
+                ESP_LOGI(TAG, "Processing bytes %d-%d.", event->current_data_offset, event->current_data_offset + event->data_len);
 
                 crc32(event->data, (size_t)event->data_len, &update_crc);
 
                 if (event->current_data_offset + event->data_len == event->total_data_len) {
-                    ESP_LOGI(TAG, "Upgrade message: end");
-                    ESP_LOGI(TAG, "Upgrade message: CRC32 %08x", update_crc);
-                    update_crc = 0;
-                    update_started = 0;
+                    ESP_LOGI(TAG, "Upgrade message: completed CRC32 %08x %s", update_crc,
+                        update_crc == advertised_crc32 ? "(confirmed)" : "(error)");
                     esp_mqtt_client_unsubscribe(_client, update_channel);
+                    update_started = false;
                 }
             }
+
             break;
         case MQTT_EVENT_ERROR:
             ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -462,6 +468,6 @@ void app_main()
     nvs_flash_init();
     wifi_init();
     mqtt_app_start();
-    xTaskCreate(logging_task, "logging", STACK_SIZE, NULL, 5, NULL);
+    // xTaskCreate(logging_task, "logging", STACK_SIZE, NULL, 5, NULL);
     xTaskCreate(version_report_task, "logging", STACK_SIZE, NULL, 5, NULL);
 }
