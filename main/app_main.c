@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <time.h>
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -33,6 +34,7 @@
 #define SAMPLE_PERIOD        (1000)   // milliseconds
 
 static const char *TAG = "LOGGER";
+static const char *OTATAG = "OTA";
 static const char *SOFTWARE = "logger";
 static const char *OK_MSG_JSON = "{\"ip\":\"%s\",\"id\":\"%02x%02x%02x%02x%02x%02x\",\"temp\":%.1f}";
 static const char *ERROR_MSG_JSON = "{\"ip\":\"%s\",\"id\":\"%02x%02x%02x%02x%02x%02x\",\"error\":\"%s\"}";
@@ -48,16 +50,45 @@ extern const uint8_t version_start[] asm("_binary_version_txt_start");
 extern const uint8_t version_end[] asm("_binary_version_txt_end");
 
 const static int CONNECTED_BIT = BIT0;
+const static int UPDATE_TIMEOUT = 20; // 20 seconds to update the software before a reset
+
+typedef enum {
+    RUNNING,
+    AWAITING_DOWNLOAD,
+    DOWNLOADING
+} ota_state_t;
 
 static EventGroupHandle_t wifi_event_group;
 static esp_mqtt_client_handle_t _client;
 static char _ip[16];
 static uint8_t _connected = 0;
-static int update_started = false;
+static ota_state_t _ota_state = RUNNING;
+static time_t _update_start_time;
 static int update_msg_id = 0;
 static uint32_t update_crc = 0;
 static uint32_t advertised_crc32 = 0;
 static char update_channel[32] = "";
+
+static void reset_upgrade(int hard) {
+    int msg_id;
+
+    if (hard) {
+        esp_restart();
+    }
+
+    if (strlen(update_channel) > 0) {
+        msg_id = esp_mqtt_client_unsubscribe(_client, update_channel);
+        ESP_LOGI(OTATAG, "Unsubscribed from %s, msg_id=%d", update_channel, msg_id);
+        strncpy(update_channel, "", sizeof(update_channel));
+    }
+
+    update_crc = 0;
+    advertised_crc32 = 0;
+    update_msg_id = -1;
+    time(&_update_start_time);
+
+    _ota_state = RUNNING;
+}
 
 static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
 {
@@ -74,7 +105,7 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             _client = client;
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
 
-            msg_id = esp_mqtt_client_subscribe(_client, "home/ota/advertise", 1);
+            msg_id = esp_mqtt_client_subscribe(_client, "home/ota/advertise", 0);
             ESP_LOGI(TAG, "Sent subscribe to home/ota/advertise, msg_id=%d", msg_id);
             break;
         case MQTT_EVENT_DISCONNECTED:
@@ -91,56 +122,70 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             ESP_LOGI(TAG, "MQTT_EVENT_PUBLISHED, msg_id=%d", event->msg_id);
             break;
         case MQTT_EVENT_DATA:
-            ESP_LOGI(TAG, "MQTT_EVENT_DATA, msg_id=%d, topic=%.*s, offset=%d, len=%d",
-                event->msg_id, event->topic_len, event->topic, event->current_data_offset, event->total_data_len);
+            // ESP_LOGI(TAG, "MQTT_EVENT_DATA, msg_id=%d, topic=%.*s, offset=%d, len=%d",
+            //     event->msg_id, event->topic_len, event->topic, event->current_data_offset, event->total_data_len);
 
             if (event->topic_len > 0 && strncmp(event->topic, "home/ota/advertise", event->topic_len) == 0) {
-                ESP_LOGI(TAG, "home/ota/advertise message");
+                reset_upgrade(false);
 
                 // Decode advertise message
                 sscanf(event->data, "%s%s%s%x", software_type, version, update_channel, &advertised_crc32);
-                ESP_LOGI(TAG, "type=%s, version=%s, channel=%s, crc32=%08x",
+                ESP_LOGI(OTATAG, "home/ota/advertise: type=%s, version=%s, channel=%s, crc32=%08x",
                     software_type, version, update_channel, advertised_crc32);
 
-                if (!update_started) {
-                    msg_id = esp_mqtt_client_subscribe(_client, update_channel, 1);
-                    ESP_LOGI(TAG, "Subscription %d sent for channel %s.", msg_id, update_channel);
+                if (advertised_crc32 == 0xffffffff) {
+                    ESP_LOGI(OTATAG, "TOPIC: %.*s, OFFSET: %d, LENGTH: %d, TOTAL: %d",
+                        event->topic_len, event->topic, event->current_data_offset, event->data_len, event->total_data_len);
+                }
 
-                    update_crc = 0;
-                    update_started = true;
-                }
-                else {
-                    ESP_LOGI(TAG, "Update has already started, ignoring home/ota/advertise message for channel %s.", update_channel);
-                }
+                _ota_state = AWAITING_DOWNLOAD;
+
+                msg_id = esp_mqtt_client_subscribe(_client, update_channel, 0);
+                ESP_LOGI(OTATAG, "Subscription %d sent for channel %s.", msg_id, update_channel);
             }
-            else if (event->topic_len > 0 && strncmp(event->topic, update_channel, event->topic_len) == 0) {
-                ESP_LOGI(TAG, "%s message", update_channel);
-                if (event->current_data_offset == 0) {
+            else if (event->topic_len > 0 && _ota_state == RUNNING) {
+                ESP_LOGI(OTATAG, "Waiting for home/ota/advertise message. Ignoring message on %.*s.", event->topic_len, event->topic);
+                ESP_LOGI(OTATAG, "TOPIC: %.*s, OFFSET: %d, LENGTH: %d, TOTAL: %d",
+                    event->topic_len, event->topic, event->current_data_offset, event->data_len, event->total_data_len);
+            }
+            else if (_ota_state == AWAITING_DOWNLOAD) {
+                if (event->topic_len > 0 && strncmp(event->topic, update_channel, event->topic_len) == 0 &&
+                    event->current_data_offset == 0) {
+
                     // Start receiving update
-                    ESP_LOGI(TAG, "Upgrade message: start");
+                    ESP_LOGI(OTATAG, "start on %s", update_channel);
+                    _ota_state = DOWNLOADING;
                     update_msg_id = event->msg_id;
                     process_bin = true;
                 }
+                else {
+                    ESP_LOGI(OTATAG, "Expecting start of software binary. Aborting.");
+                    ESP_LOGI(OTATAG, "TOPIC: %.*s, OFFSET: %d, LENGTH: %d, TOTAL: %d",
+                        event->topic_len, event->topic, event->current_data_offset, event->data_len, event->total_data_len);
+                    reset_upgrade(true);
+                }
             }
-            else if (event->topic_len == 0 && update_started && update_msg_id == event->msg_id) {
-                ESP_LOGI(TAG, "Upgrade message: continuation");
+            else if (event->topic_len == 0 && _ota_state == DOWNLOADING && update_msg_id == event->msg_id ) {
                 process_bin = true;
             }
             else {
-                ESP_LOGI(TAG, "Upgrade message: upgrade unsuccessful, ignoring data");
-                esp_mqtt_client_unsubscribe(_client, update_channel);
+                if (event->current_data_offset ==  0) {
+                    ESP_LOGI(OTATAG, "Unexpected state, aborting.");
+                    ESP_LOGI(OTATAG, "TOPIC: %.*s, OFFSET: %d, LENGTH: %d, TOTAL: %d",
+                        event->topic_len, event->topic, event->current_data_offset, event->data_len, event->total_data_len);
+                }
+
+                reset_upgrade(true);
             }
 
             if (process_bin) {
-                ESP_LOGI(TAG, "Processing bytes %d-%d.", event->current_data_offset, event->current_data_offset + event->data_len);
-
                 crc32(event->data, (size_t)event->data_len, &update_crc);
 
                 if (event->current_data_offset + event->data_len == event->total_data_len) {
-                    ESP_LOGI(TAG, "Upgrade message: completed CRC32 %08x %s", update_crc,
+                    ESP_LOGI(OTATAG, "Upgrade message: completed CRC32 %08x %s", update_crc,
                         update_crc == advertised_crc32 ? "(confirmed)" : "(error)");
-                    esp_mqtt_client_unsubscribe(_client, update_channel);
-                    update_started = false;
+
+                    reset_upgrade(true);
                 }
             }
 
@@ -234,15 +279,26 @@ uint8_t wifi_wait(TickType_t xTicksToWait) {
 void version_report_task(void *pParam) {
     int msg_id;
     char message[100];
+    time_t current_time;
     uint8_t wifi_connected = wifi_wait(portMAX_DELAY);
     ESP_LOGI(TAG, "WiFi state after initial wait is %s.", wifi_connected ? "connected" : "not connected");
 
     while (1) {
-        // Check that wifi is still connected
+        // Check that wifi is still connected and the update is not started
         wifi_connected = wifi_wait(0);
-        if (_connected && wifi_connected) {
+        if (_ota_state > RUNNING) {
+            time(&current_time);
+            if (difftime(current_time, _update_start_time) > UPDATE_TIMEOUT) {
+                ESP_LOGI(OTATAG, "Update timed-out, aborting.");
+                reset_upgrade(false);
+            }
+            else {
+                ESP_LOGI(TAG, "Update already in progress, skipping publish...");
+            }
+        }
+        else if (_connected && wifi_connected) {
             sprintf(message, VERSION_MSG_JSON, _ip, SOFTWARE, (const char *)version_start);
-            msg_id = esp_mqtt_client_publish(_client, "home/ota/report", message, 0, 1, 0);
+            msg_id = esp_mqtt_client_publish(_client, "home/ota/report", message, 0, 0, 0);
             ESP_LOGI(TAG, "Published version message msg_id=%d: %s", msg_id, message);
         }
         else {
@@ -427,7 +483,7 @@ void logging_task()
                             error_msg);
                     }
 
-                    msg_id = esp_mqtt_client_publish(_client, "home/pool", message, 0, 1, 0);
+                    msg_id = esp_mqtt_client_publish(_client, "home/pool", message, 0, 0, 0);
                     ESP_LOGI(TAG, "Published logger message msg_id=%d: %s", msg_id, message);
                 }
             }
