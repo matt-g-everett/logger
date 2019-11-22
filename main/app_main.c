@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <time.h>
+#include "esp_ota_ops.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "nvs_flash.h"
@@ -50,7 +51,7 @@ extern const uint8_t version_start[] asm("_binary_version_txt_start");
 extern const uint8_t version_end[] asm("_binary_version_txt_end");
 
 const static int CONNECTED_BIT = BIT0;
-const static int UPDATE_TIMEOUT = 20; // 20 seconds to update the software before a reset
+const static int UPDATE_TIMEOUT = 60; // 60 seconds to update the software before a reset
 
 typedef enum {
     RUNNING,
@@ -68,6 +69,9 @@ static int update_msg_id = 0;
 static uint32_t update_crc = 0;
 static uint32_t advertised_crc32 = 0;
 static char update_channel[32] = "";
+
+static esp_ota_handle_t _update_handle = 0;
+static const esp_partition_t *_update_partition = NULL;
 
 static void reset_upgrade(int hard) {
     int msg_id;
@@ -97,6 +101,9 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
     int process_bin = false;
     char software_type[16];
     char version[32];
+    esp_err_t err;
+    const esp_partition_t *configured = esp_ota_get_boot_partition();
+    const esp_partition_t *running = esp_ota_get_running_partition();
 
     // your_context_t *context = event->context;
     switch (event->event_id) {
@@ -104,6 +111,7 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             _connected = 1;
             _client = client;
             ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
+            ESP_LOGI(TAG, "***** logger started, version: %s *****", (const char *)version_start);
 
             msg_id = esp_mqtt_client_subscribe(_client, "home/ota/advertise", 0);
             ESP_LOGI(TAG, "Sent subscribe to home/ota/advertise, msg_id=%d", msg_id);
@@ -157,6 +165,30 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
                     _ota_state = DOWNLOADING;
                     update_msg_id = event->msg_id;
                     process_bin = true;
+
+                    configured = esp_ota_get_boot_partition();
+                    running = esp_ota_get_running_partition();
+
+                    if (configured != running) {
+                        ESP_LOGW(OTATAG, "Configured OTA boot partition at offset 0x%08x, but running from offset 0x%08x",
+                            configured->address, running->address);
+                        ESP_LOGW(OTATAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
+                    }
+                    ESP_LOGI(OTATAG, "Running partition type %d subtype %d (offset 0x%08x)",
+                        running->type, running->subtype, running->address);
+
+                    _update_partition = esp_ota_get_next_update_partition(NULL);
+                    ESP_LOGI(OTATAG, "Writing to partition subtype %d at offset 0x%x",
+                        _update_partition->subtype, _update_partition->address);
+                    //assert(update_partition != NULL);
+
+                    err = esp_ota_begin(_update_partition, OTA_SIZE_UNKNOWN, &_update_handle);
+                    if (err != ESP_OK) {
+                        ESP_LOGE(OTATAG, "esp_ota_begin failed (%s)", esp_err_to_name(err));
+                        reset_upgrade(true);
+                        return 0;
+                    }
+                    ESP_LOGI(OTATAG, "esp_ota_begin succeeded");
                 }
                 else {
                     ESP_LOGI(OTATAG, "Expecting start of software binary. Aborting.");
@@ -179,13 +211,33 @@ static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
             }
 
             if (process_bin) {
+                err = esp_ota_write(_update_handle, (const void *)event->data, event->data_len);
+
                 crc32(event->data, (size_t)event->data_len, &update_crc);
 
                 if (event->current_data_offset + event->data_len == event->total_data_len) {
                     ESP_LOGI(OTATAG, "Upgrade message: completed CRC32 %08x %s", update_crc,
                         update_crc == advertised_crc32 ? "(confirmed)" : "(error)");
 
-                    reset_upgrade(true);
+                    if (update_crc == advertised_crc32) {
+                        ESP_LOGI(OTATAG, "Running esp_ota_end");
+                        if (esp_ota_end(_update_handle) == ESP_OK) {
+                            ESP_LOGI(OTATAG, "Running esp_ota_set_boot_partition");
+                            err = esp_ota_set_boot_partition(_update_partition);
+                            if (err == ESP_OK) {
+                                ESP_LOGI(OTATAG, "***** UPGRADE COMPLETE *****");
+                                reset_upgrade(true);
+                            }
+                            else {
+                                ESP_LOGE(OTATAG, "esp_ota_set_boot_partition failed (%s)!", esp_err_to_name(err));
+                            }
+                        }
+                        else {
+                            ESP_LOGE(OTATAG, "esp_ota_end failed (%s)!", esp_err_to_name(err));
+                        }
+                    }
+
+
                 }
             }
 
@@ -291,9 +343,6 @@ void version_report_task(void *pParam) {
             if (difftime(current_time, _update_start_time) > UPDATE_TIMEOUT) {
                 ESP_LOGI(OTATAG, "Update timed-out, aborting.");
                 reset_upgrade(false);
-            }
-            else {
-                ESP_LOGI(TAG, "Update already in progress, skipping publish...");
             }
         }
         else if (_connected && wifi_connected) {
@@ -510,6 +559,8 @@ void logging_task()
 
 void app_main()
 {
+    esp_err_t err;
+
     ESP_LOGI(TAG, "[APP] Startup..");
     ESP_LOGI(TAG, "[APP] Free memory: %d bytes", esp_get_free_heap_size());
     ESP_LOGI(TAG, "[APP] IDF version: %s", esp_get_idf_version());
@@ -521,7 +572,16 @@ void app_main()
     esp_log_level_set("TRANSPORT", ESP_LOG_VERBOSE);
     esp_log_level_set("OUTBOX", ESP_LOG_VERBOSE);
 
-    nvs_flash_init();
+    err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        // OTA app partition table has a smaller NVS partition size than the non-OTA
+        // partition table. This size mismatch may cause NVS initialization to fail.
+        // If this happens, we erase NVS partition and initialize NVS again.
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK( err );
+
     wifi_init();
     mqtt_app_start();
     // xTaskCreate(logging_task, "logging", STACK_SIZE, NULL, 5, NULL);

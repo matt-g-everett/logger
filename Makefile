@@ -8,12 +8,11 @@ include $(IDF_PATH)/make/project.mk
 
 EXTRA_COMPONENT_DIRS := $(PROJECT_PATH)/components
 
-.PHONY: ota increment coapapi
+.PHONY: ota increment
 
 increment:
 	# Increment the prerelease number automatically
 	python ota/inc-version.py
 
 ota: increment all
-	# Copy the version into the publish location
-	cp $(PROJECT_PATH)/version.txt $(PROJECT_PATH)/publish/version
+	ota/publishbin.sh $(PROJECT_NAME) $(PROJECT_PATH)
