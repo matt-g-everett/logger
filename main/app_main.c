@@ -31,7 +31,6 @@ static const char *DS18B20_ERROR_MSG_UNKNOWN = "unknownError";
 extern const uint8_t version_start[] asm("_binary_version_txt_start");
 extern const uint8_t version_end[] asm("_binary_version_txt_end");
 
-static esp_mqtt_client_handle_t _client;
 static mqtt_ota_state_handle_t _mqtt_ota_state;
 
 
@@ -77,8 +76,8 @@ static esp_mqtt_client_handle_t mqtt_app_start(void)
         .uri = CONFIG_BROKER_URL,
         .event_handle = mqtt_event_handler,
         .username = CONFIG_MQTT_USERNAME,
-        .password = CONFIG_MQTT_PASSWORD
-        // .user_context = (void *)your_context
+        .password = CONFIG_MQTT_PASSWORD,
+        .buffer_size = 1024
     };
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
@@ -87,8 +86,10 @@ static esp_mqtt_client_handle_t mqtt_app_start(void)
     return client;
 }
 
-void logging_task()
+void logging_task(void *pParam)
 {
+    esp_mqtt_client_handle_t client = (esp_mqtt_client_handle_t)pParam;
+
     // Override global log level
     esp_log_level_set("*", ESP_LOG_INFO);
 
@@ -193,7 +194,7 @@ void logging_task()
 
         TickType_t last_wake_time = xTaskGetTickCount();
 
-        while (1)
+        while (true)
         {
             last_wake_time = xTaskGetTickCount();
 
@@ -261,7 +262,7 @@ void logging_task()
                             error_msg);
                     }
 
-                    msg_id = esp_mqtt_client_publish(_client, "home/pool", message, 0, 0, 0);
+                    msg_id = esp_mqtt_client_publish(client, "home/pool", message, 0, 0, 0);
                     ESP_LOGI(TAG, "Published logger message msg_id=%d: %s", msg_id, message);
                 }
             }
@@ -315,4 +316,5 @@ void app_main()
     esp_mqtt_client_handle_t client = mqtt_app_start();
     _mqtt_ota_state = mqtt_ota_init(client, SOFTWARE, (const char *)version_start);
     xTaskCreate(mqtt_ota_task, "ota", STACK_SIZE, _mqtt_ota_state, 5, NULL);
+    xTaskCreate(logging_task, "logging", STACK_SIZE, client, 5, NULL);
 }
