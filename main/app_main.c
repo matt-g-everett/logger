@@ -7,7 +7,7 @@
 #include "ds18b20.h"
 
 #include "mqtt_client.h"
-#include "mqtt_ota.h"
+#include "ota_mqtt.h"
 #include "crc32.h"
 #include "wifi.h"
 
@@ -76,8 +76,7 @@ static esp_mqtt_client_handle_t mqtt_app_start(void)
         .uri = CONFIG_BROKER_URL,
         .event_handle = mqtt_event_handler,
         .username = CONFIG_MQTT_USERNAME,
-        .password = CONFIG_MQTT_PASSWORD,
-        .buffer_size = 1024
+        .password = CONFIG_MQTT_PASSWORD
     };
 
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);

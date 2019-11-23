@@ -6,7 +6,7 @@
 #include "crc32.h"
 #include "wifi.h"
 
-#include "mqtt_ota.h"
+#include "ota_mqtt.h"
 
 static const char *TAG = "OTA";
 static const char *VERSION_MSG_JSON = "{\"ip\":\"%s\",\"type\":\"%s\",\"version\":\"%s\"}";
@@ -62,12 +62,13 @@ void mqtt_ota_task(void *pParam) {
     mqtt_ota_state_handle_t state = (mqtt_ota_state_handle_t)pParam;
 
     int msg_id;
+    int delay = 1000;
     char message[100];
     time_t current_time;
     uint8_t wifi_connected = wifi_wait(portMAX_DELAY);
     ESP_LOGI(TAG, "WiFi state after initial wait is %s.", wifi_connected ? "connected" : "not connected");
 
-    while (1) {
+    while (true) {
         // Check that wifi is still connected and the update is not started
         wifi_connected = wifi_wait(0);
         if (state->ota_state > RUNNING) {
@@ -78,16 +79,18 @@ void mqtt_ota_task(void *pParam) {
             }
         }
         else if (state->connected && wifi_connected) {
-
             sprintf(message, VERSION_MSG_JSON, wifi_get_ip(), state->software, state->version);
             msg_id = esp_mqtt_client_publish(state->client, "home/ota/report", message, 0, 0, 0);
             ESP_LOGI(TAG, "Published version message msg_id=%d: %s", msg_id, message);
+
+            // Once we've sent at least one message, we can report more slowly
+            delay = 10000;
         }
         else {
             ESP_LOGI(TAG, "WiFi not connected, skipping publish...");
         }
 
-        vTaskDelay(10000 / portTICK_PERIOD_MS);
+        vTaskDelay(delay / portTICK_PERIOD_MS);
     }
 }
 
