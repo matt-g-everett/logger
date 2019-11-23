@@ -32,8 +32,7 @@ const int CONNECTED_BIT = BIT0;
 
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
-{
+                                int32_t event_id, void* event_data) {
     switch (event_id) {
         case WIFI_EVENT_STA_START:
             esp_wifi_connect();
@@ -49,8 +48,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 }
 
 static void ip_event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
-{
+                                int32_t event_id, void* event_data) {
     switch (event_id) {
         case IP_EVENT_STA_GOT_IP:
             xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
@@ -63,8 +61,7 @@ static void ip_event_handler(void* arg, esp_event_base_t event_base,
     return;
 }
 
-void wifi_init(void)
-{
+void wifi_init(const char *ssid, const char *password) {
     tcpip_adapter_init();
     wifi_event_group = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -74,12 +71,9 @@ void wifi_init(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = CONFIG_WIFI_SSID,
-            .password = CONFIG_WIFI_PASSWORD,
-        },
-    };
+    wifi_config_t wifi_config = { };
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
+    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config));
     ESP_LOGI(TAG, "start the WIFI SSID:[%s] password:[%s]", CONFIG_WIFI_SSID, "******");

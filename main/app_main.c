@@ -312,7 +312,7 @@ void app_main()
     }
     ESP_ERROR_CHECK( err );
 
-    wifi_init();
+    wifi_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
     esp_mqtt_client_handle_t client = mqtt_app_start();
     _mqtt_ota_state = mqtt_ota_init(client, SOFTWARE, (const char *)version_start);
     xTaskCreate(mqtt_ota_task, "ota", STACK_SIZE, _mqtt_ota_state, 5, NULL);
