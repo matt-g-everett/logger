@@ -4,7 +4,7 @@
 #include "owb.h"
 #include "owb_rmt.h"
 #include "ds18b20.h"
-#include "wifi.h"
+#include "iotp_wifi.h"
 
 #include "iotp_ds18b20.h"
 

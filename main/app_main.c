@@ -3,9 +3,8 @@
 #include "nvs_flash.h"
 
 #include "mqtt_client.h"
-#include "ota_mqtt.h"
-#include "crc32.h"
-#include "wifi.h"
+#include "iotp_ota.h"
+#include "iotp_wifi.h"
 #include "iotp_ds18b20.h"
 
 #define STACK_SIZE 4096
