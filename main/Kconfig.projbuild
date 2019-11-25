@@ -36,10 +36,6 @@ config OTA_TOPIC_ADVERTISE
     help
         MQTT topic on which OTA software versions will be advertised.
 
-config BROKER_URL_FROM_STDIN
-    bool
-    default y if BROKER_URL = "FROM_STDIN"
-
 config ONE_WIRE_GPIO
     int "OneWire GPIO number"
 	range 0 34
