@@ -6,10 +6,10 @@
 	url = git@github.com:DavidAntliff/esp32-ds18b20.git
 [submodule "components/esp-ota-mqtt"]
 	path = components/esp-ota-mqtt
-	url = git@work.github.com:matt-g-everett/esp-ota-mqtt.git
+	url = git@github.com:matt-g-everett/esp-ota-mqtt.git
 [submodule "components/crc32"]
 	path = components/crc32
-	url = git@work.github.com:matt-g-everett/crc32.git
+	url = git@github.com:matt-g-everett/crc32.git
 [submodule "components/esp-wifi"]
 	path = components/esp-wifi
-	url = git@work.github.com:matt-g-everett/esp-wifi.git
+	url = git@github.com:matt-g-everett/esp-wifi.git
