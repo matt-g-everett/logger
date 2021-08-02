@@ -79,14 +79,9 @@ void new_reading(float reading) {
 }
 
 void start_tasks(void) {
-    esp_mqtt_client_handle_t client = mqtt_app_start();
-    _mqtt_ota_state = mqtt_ota_init(client, SOFTWARE, (const char *)version_start);
-    _logger_handle = iotp_ds18b20_init(client, CONFIG_ONE_WIRE_GPIO, new_reading);
-    _heater_handle = iotp_heater_init(CONFIG_HEATER_GPIO);
-
     xTaskCreate(mqtt_ota_task, "ota", STACK_SIZE, _mqtt_ota_state, 5, NULL);
     xTaskCreate(iotp_ds18b20_task, "logging", STACK_SIZE, _logger_handle, 5, NULL);
-    xTaskCreate(iotp_heater_task, "heater", STACK_SIZE, _logger_handle, 5, NULL);
+    xTaskCreate(iotp_heater_task, "heater", STACK_SIZE, _heater_handle, 5, NULL);
 }
 
 void time_sync_notification_cb(struct timeval *tv)
@@ -136,6 +131,11 @@ void app_main()
 
     wifi_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
 
-    start_tasks();
+    esp_mqtt_client_handle_t client = mqtt_app_start();
+    _mqtt_ota_state = mqtt_ota_init(client, SOFTWARE, (const char *)version_start);
+    _logger_handle = iotp_ds18b20_init(client, CONFIG_ONE_WIRE_GPIO, new_reading);
+    _heater_handle = iotp_heater_init(CONFIG_HEATER_GPIO);
+
     initialize_sntp();
+    start_tasks();
 }

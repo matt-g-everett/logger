@@ -10,8 +10,8 @@ extern "C" {
 #include "freertos/FreeRTOS.h"
 
 typedef struct {
-    time_t last_state_change;
-    time_t holdoff;
+    TickType_t last_state_change;
+    TickType_t holdoff;
     bool current;
     bool desired;
     float reading;
