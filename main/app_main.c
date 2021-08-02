@@ -4,6 +4,7 @@
 #include "nvs_flash.h"
 
 #include "mqtt_client.h"
+#include "iotp_heater.h"
 #include "iotp_ota.h"
 #include "iotp_wifi.h"
 #include "iotp_ds18b20.h"
@@ -19,7 +20,7 @@ extern const uint8_t version_end[] asm("_binary_version_txt_end");
 
 static mqtt_ota_state_handle_t _mqtt_ota_state;
 static iotp_ds18b20_handle_t _logger_handle;
-static uint8_t _tasks_started = false;
+static iotp_heater_handle_t _heater_handle;
 
 static esp_err_t mqtt_event_handler(esp_mqtt_event_handle_t event)
 {
@@ -73,21 +74,26 @@ static esp_mqtt_client_handle_t mqtt_app_start(void)
     return client;
 }
 
+void new_reading(float reading) {
+    iotp_heater_set_reading(_heater_handle, reading);
+}
+
 void start_tasks(void) {
     esp_mqtt_client_handle_t client = mqtt_app_start();
     _mqtt_ota_state = mqtt_ota_init(client, SOFTWARE, (const char *)version_start);
-    xTaskCreate(mqtt_ota_task, "ota", STACK_SIZE, _mqtt_ota_state, 5, NULL);
+    _logger_handle = iotp_ds18b20_init(client, CONFIG_ONE_WIRE_GPIO, new_reading);
+    _heater_handle = iotp_heater_init(CONFIG_HEATER_GPIO);
 
-    _logger_handle = iotp_ds18b20_init(client, CONFIG_ONE_WIRE_GPIO);
+    xTaskCreate(mqtt_ota_task, "ota", STACK_SIZE, _mqtt_ota_state, 5, NULL);
     xTaskCreate(iotp_ds18b20_task, "logging", STACK_SIZE, _logger_handle, 5, NULL);
+    xTaskCreate(iotp_heater_task, "heater", STACK_SIZE, _logger_handle, 5, NULL);
 }
 
 void time_sync_notification_cb(struct timeval *tv)
 {
     ESP_LOGI(TAG, "NTP sync");
-    if (!_tasks_started) {
-        start_tasks();
-    }
+    iotp_ds18b20_set_ntp(_logger_handle, true);
+    iotp_heater_set_ntp(_heater_handle, true);
 }
 
 static void initialize_sntp(void)
@@ -129,5 +135,7 @@ void app_main()
     ESP_ERROR_CHECK( err );
 
     wifi_init(CONFIG_WIFI_SSID, CONFIG_WIFI_PASSWORD);
+
+    start_tasks();
     initialize_sntp();
 }
